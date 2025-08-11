@@ -1,0 +1,285 @@
+/* Snake VIP
+ - WebAudio simple fx (no external files)
+ - Skins, local leaderboard (localStorage)
+ - Mobile & keyboard controls, swipe support
+*/
+
+// ====== CONFIG ======
+const GRID = 20;          // px cell
+const CANVAS_SIZE = 420;  // canvas width/height (kept square)
+const STORAGE_KEY = 'tk_snake_vip_lb';
+const BEST_KEY = 'tk_snake_vip_best';
+
+// ====== DOM refs ======
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = CANVAS_SIZE; canvas.height = CANVAS_SIZE;
+
+const scoreEl = document.getElementById('score');
+const bestEl = document.getElementById('best');
+const startBtn = document.getElementById('startBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const resetBtn = document.getElementById('resetBtn');
+const playerName = document.getElementById('playerName');
+const submitScore = document.getElementById('submitScore');
+const leaderList = document.getElementById('leaderList');
+const clearLB = document.getElementById('clearLB');
+const exportLB = document.getElementById('exportLB');
+const soundToggle = document.getElementById('soundToggle');
+const skinSelect = document.getElementById('skinSelect');
+const overlay = document.getElementById('overlay');
+
+// mobile buttons
+const upBtn = document.getElementById('up');
+const downBtn = document.getElementById('down');
+const leftBtn = document.getElementById('left');
+const rightBtn = document.getElementById('right');
+
+// ====== STATE ======
+const COLS = Math.floor(CANVAS_SIZE / GRID);
+const ROWS = Math.floor(CANVAS_SIZE / GRID);
+
+let snake = [];
+let dir = {x:1,y:0};
+let food = null;
+let running = false;
+let intervalId = null;
+let tickSpeed = 120;
+let score = 0;
+let best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0;
+bestEl.textContent = best;
+let skins = {
+  classic: {head:'#ff6b6b', body:'#ff9b9b', food:'#ffd166', bg:'#031217'},
+  neon: {head:'#00ffd5', body:'#00a6b9', food:'#ff2d95', bg:'#06121a'},
+  pastel: {head:'#8ecae6', body:'#ffd6a5', food:'#bde0fe', bg:'#091726'},
+  gold: {head:'#ffd166', body:'#ffb703', food:'#fff1c1', bg:'#0a0a0a'}
+};
+let currentSkin = 'classic';
+
+// ====== Audio (WebAudio simple synth) ======
+const audioCtx = (typeof window.AudioContext !== 'undefined') ? new AudioContext() : null;
+function playBeep(freq=440, length=0.08, type='sine', gain=0.12){
+  if(!audioCtx || !soundToggle.checked) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.value = gain;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + length);
+  o.stop(audioCtx.currentTime + length + 0.02);
+}
+function playEat(){ playBeep(900,0.09,'sawtooth',0.14) }
+function playMove(){ playBeep(850,0.02,'sine',0.03) }
+function playGameOver(){ playBeep(120,0.28,'sine',0.2); playBeep(180,0.18,'sine',0.12) }
+
+// ====== GAME LOGIC ======
+function resetGame(){
+  snake = [{x:Math.floor(COLS/2), y:Math.floor(ROWS/2)}];
+  dir = {x:1,y:0};
+  spawnFood();
+  score = 0;
+  scoreEl.textContent = score;
+  running = false;
+  clearInterval(intervalId);
+  tickSpeed = 120;
+  draw();
+  overlay.textContent = 'Ready';
+}
+function spawnFood(){
+  let tries=0;
+  while(true){
+    const x = Math.floor(Math.random()*COLS);
+    const y = Math.floor(Math.random()*ROWS);
+    if(!snake.some(s=>s.x===x && s.y===y)){ food={x,y}; return; }
+    if(++tries>200){ food={x:0,y:0}; return }
+  }
+}
+function draw(){
+  // background
+  ctx.fillStyle = skins[currentSkin].bg;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // food (rounded)
+  if(food){
+    ctx.fillStyle = skins[currentSkin].food;
+    drawCell(food.x,food.y, true);
+  }
+
+  // snake
+  snake.forEach((s,i)=>{
+    ctx.fillStyle = (i===0) ? skins[currentSkin].head : skins[currentSkin].body;
+    drawCell(s.x,s.y, i===0);
+  });
+}
+function drawCell(x,y, rounded=false){
+  const pad = 2;
+  const px = x*GRID + pad;
+  const py = y*GRID + pad;
+  const size = GRID - pad*2;
+  if(rounded){
+    const r = Math.max(2, Math.floor(size*0.2));
+    roundRect(ctx, px, py, size, size, r);
+    ctx.fill();
+  } else {
+    ctx.fillRect(px,py,size,size);
+  }
+}
+function roundRect(ctx, x, y, w, h, r){
+  ctx.beginPath(); ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+function tick(){
+  // compute new head
+  const head = {...snake[0]};
+  head.x += dir.x; head.y += dir.y;
+  // wrap
+  if(head.x < 0) head.x = COLS-1;
+  if(head.x >= COLS) head.x = 0;
+  if(head.y < 0) head.y = ROWS-1;
+  if(head.y >= ROWS) head.y = 0;
+
+  // collision self
+  if(snake.some(s => s.x===head.x && s.y===head.y)){
+    gameOver(); return;
+  }
+
+  snake.unshift(head);
+  // eat?
+  if(food && head.x===food.x && head.y===food.y){
+    score += 1; scoreEl.textContent = score;
+    playEat();
+    spawnFood();
+    if(score % 5 === 0 && tickSpeed > 40){
+      tickSpeed -= 8; restartLoop();
+    }
+  } else {
+    snake.pop();
+    playMove();
+  }
+  draw();
+}
+
+function restartLoop(){
+  clearInterval(intervalId);
+  intervalId = setInterval(tick, tickSpeed);
+}
+
+function startGame(){
+  if(!running){
+    running = true; restartLoop();
+    overlay.textContent = '';
+  }
+}
+function pauseGame(){
+  if(running){ clearInterval(intervalId); running=false; overlay.textContent='Paused' }
+  else { startGame() }
+}
+function gameOver(){
+  clearInterval(intervalId); running=false;
+  playGameOver();
+  overlay.textContent = 'Game Over — Điểm: ' + score;
+  if(score > best){ best = score; localStorage.setItem(BEST_KEY, String(best)); bestEl.textContent = best; }
+  // keep board visible, reset after short delay
+  setTimeout(()=>resetGame(), 900);
+}
+function setDirection(dx,dy){
+  if(snake.length > 1 && dx === -dir.x && dy === -dir.y) return;
+  dir = {x:dx,y:dy};
+}
+
+// ====== CONTROLS ======
+window.addEventListener('keydown', e=>{
+  if(e.key==='ArrowUp') setDirection(0,-1);
+  if(e.key==='ArrowDown') setDirection(0,1);
+  if(e.key==='ArrowLeft') setDirection(-1,0);
+  if(e.key==='ArrowRight') setDirection(1,0);
+  if(e.key===' '){ e.preventDefault(); if(!running) startGame(); else pauseGame(); }
+});
+upBtn.addEventListener('click', ()=> setDirection(0,-1));
+downBtn.addEventListener('click', ()=> setDirection(0,1));
+leftBtn.addEventListener('click', ()=> setDirection(-1,0));
+rightBtn.addEventListener('click', ()=> setDirection(1,0));
+
+startBtn.addEventListener('click', ()=> { if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); startGame();});
+pauseBtn.addEventListener('click', ()=> pauseGame());
+resetBtn.addEventListener('click', ()=> { resetGame(); startGame(); });
+
+// swipe support
+let touchStart = null;
+canvas.addEventListener('touchstart', e => {
+  const t = e.touches[0]; touchStart = {x:t.clientX, y:t.clientY};
+});
+canvas.addEventListener('touchend', e => {
+  if(!touchStart) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+  if(Math.abs(dx) > Math.abs(dy)){
+    if(dx > 20) setDirection(1,0); else if(dx < -20) setDirection(-1,0);
+  } else {
+    if(dy > 20) setDirection(0,1); else if(dy < -20) setDirection(0,-1);
+  }
+  touchStart = null;
+});
+
+// skin change
+skinSelect.addEventListener('change', e => { currentSkin = e.target.value; draw(); });
+
+// ====== LEADERBOARD (localStorage) ======
+function readLB(){
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) { return []; }
+}
+function writeLB(list){ localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); }
+function pushScore(name, sc){
+  const list = readLB();
+  list.push({name: name.slice(0,12), score: sc, ts: Date.now()});
+  list.sort((a,b)=>b.score - a.score || a.ts - b.ts);
+  writeLB(list.slice(0,50)); // keep top50
+  renderLB();
+}
+function renderLB(){
+  const list = readLB();
+  leaderList.innerHTML = '';
+  list.slice(0,10).forEach((it,i)=>{
+    const li = document.createElement('li');
+    li.textContent = `${i+1}. ${it.name} — ${it.score}`;
+    leaderList.appendChild(li);
+  });
+}
+submitScore.addEventListener('click', ()=> {
+  const name = (playerName.value || '').trim();
+  if(!name || name.length < 2){ alert('Nhập tên (ít nhất 2 ký tự)'); return; }
+  pushScore(name, score);
+  alert('Đã gửi điểm!'); playerName.value = '';
+});
+clearLB.addEventListener('click', ()=> {
+  if(confirm('Xóa toàn bộ leaderboard local?')){ writeLB([]); renderLB(); }
+});
+exportLB.addEventListener('click', ()=> {
+  const data = JSON.stringify(readLB(), null, 2);
+  const blob = new Blob([data], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'snake_leaderboard.json'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+// ====== INIT ======
+function init(){
+  resetGame();
+  renderLB();
+  // keep best updated
+  best = parseInt(localStorage.getItem(BEST_KEY) || '0',10) || 0;
+  bestEl.textContent = best;
+  // small resize-friendly draw
+  window.addEventListener('resize', draw);
+}
+init();
